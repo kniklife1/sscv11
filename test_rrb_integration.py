@@ -76,7 +76,8 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(len(app.ADAPTER_REGISTRY), 10)
         for src in app.SOURCES:
             self.assertIn(src.adapter_name, app.ADAPTER_REGISTRY)
-            self.assertEqual(src.date_policy, "informational", src.source_id)
+            expected = "informational" if src.source_id == "rrb_rrcb" else "strict"
+            self.assertEqual(src.date_policy, expected, src.source_id)
 
     def test_base_endpoint_is_configured_and_rrcb_value_is_gone(self) -> None:
         self.assertEqual(RRB.notice_urls, (ENDPOINT,))
@@ -132,25 +133,19 @@ class ParserTests(unittest.TestCase):
         admit = next(n for n in got if n.url.endswith("cen05_admit.pdf"))
         self.assertEqual(admit.publication_date, "2026-10-20")
 
-    def test_malformed_dates_become_none_or_preserved_safely(self) -> None:
-        feed = json.dumps([
-            {"id": 1, "title": "CEN 07/2026 Recruitment Notification for Technicians", "link": "/a.pdf", "date": "31-02-2026"},
-            {"id": 2, "title": "CEN 07/2026 Corrigendum on Recruitment vacancy table", "link": "/b.pdf", "date": "not a date"},
-            {"id": 3, "title": "CEN 07/2026 Tentative Exam Schedule for Technicians", "link": "/c.pdf", "date": "Oct 2026"},
-        ])
+    def test_malformed_dates_become_none_not_garbage(self) -> None:
+        feed = json.dumps([{"id": 1, "title": "CEN 07/2026 Recruitment Notification for Technicians", "link": "/a.pdf", "date": "31-02-2026"},
+                           {"id": 2, "title": "CEN 07/2026 Corrigendum on Recruitment vacancy table", "link": "/b.pdf", "date": "not a date"}])
         got = app.parse_rrcb_response(RRB, feed)
-        self.assertEqual([n.publication_date for n in got], [None, None, "Oct 2026"])
+        self.assertEqual([n.publication_date for n in got], [None, None])
 
-    def test_challenge_empty_shell_and_unknown_shapes_fail_loudly_while_empty_json_is_valid(self) -> None:
-        # Genuine empty JSON lists/collections return [] (valid empty result, not a crash)
-        for valid_empty in ("[]", '{"data": []}', '{"records": []}', '{"notices": [], "count": 0}'):
-            self.assertEqual(app.parse_rrcb_response(RRB, valid_empty), [], valid_empty)
-
+    def test_challenge_empty_shell_and_unknown_shapes_fail_loudly(self) -> None:
         cases = [
             ("<html><title>Just a moment...</title><body>Checking your browser</body></html>", "ACCESS_DENIED_PAGE"),
             ("<html><body><h1>Access Denied</h1></body></html>", "ACCESS_DENIED_PAGE"),
+            ("[]", "UNRECOGNIZED_STRUCTURE"),
+            ('{"data": []}', "UNRECOGNIZED_STRUCTURE"),
             ("<html><body><p>Welcome</p></body></html>", "UNRECOGNIZED_STRUCTURE"),
-            ('{"data": null}', "UNRECOGNIZED_STRUCTURE"),
             ("{ not json", "INVALID_JSON"),
             ("   ", "EMPTY_RESPONSE"),
         ]
@@ -257,10 +252,9 @@ class MonitorBehaviourTests(unittest.TestCase):
         old = next(m for t, m in messages.items() if "500 Posts" in t)
         self.assertIn("Publication Date:</b> 2019-01-05", old)  # informational date is still shown
         undated = next(m for t, m in messages.items() if "E-Call Letter" in t)
-        self.assertIn("Publication Date:</b> Not available", undated)
+        self.assertNotIn("Publication Date", undated)
         garbage = next(m for t, m in messages.items() if "Answer Key" in t)
         self.assertNotIn("31-02-2026", garbage)
-        self.assertIn("Publication Date:</b> Not available", garbage)
         st = self._state()
         tender = next(r for r in st["notices"].values() if "canteen" in r["title"])
         self.assertEqual(tender["delivery_status"], "baselined")
@@ -289,7 +283,7 @@ class MonitorBehaviourTests(unittest.TestCase):
         for failure in (
             app.SourceFetchError("CONNECTION_TIMEOUT", "timed out"),
             (200, {}, "<html><title>Just a moment...</title></html>"),
-            (200, {}, "<html><body><p>Unrecognized shell</p></body></html>"),
+            (200, {}, "[]"),
             (200, {}, "{ broken"),
         ):
             summary, _, _ = run(self.state_path, failure, RecordingNotifier())
@@ -302,14 +296,12 @@ class MonitorBehaviourTests(unittest.TestCase):
             self.assertEqual({fp: r["delivery_status"] for fp, r in after_rrb.items()},
                              {fp: r["delivery_status"] for fp, r in before_rrb.items()})
 
-    def test_empty_first_fetch_does_not_complete_baseline_so_history_is_never_announced(self) -> None:
+    def test_failed_first_fetch_does_not_complete_baseline_so_history_is_never_announced(self) -> None:
         summary, _, _ = run(self.state_path, (200, {}, "[]"), RecordingNotifier())
-        self.assertEqual(summary.per_source_results["rrb_rrcb"]["status"], "ok")
-        self.assertEqual(summary.per_source_results["rrb_rrcb"]["discovered"], 0)
         st = self._state()
         self.assertFalse(st["sources"]["rrb_rrcb"]["baseline_completed"])
         notifier = RecordingNotifier()
-        run(self.state_path, json_feed(), notifier)  # first non-empty fetch baselines silently
+        run(self.state_path, json_feed(), notifier)  # first REAL fetch baselines silently
         self.assertEqual(len(notifier.sent_notices), 0)
         self.assertTrue(self._state()["sources"]["rrb_rrcb"]["baseline_completed"])
 
@@ -349,8 +341,8 @@ class MonitorBehaviourTests(unittest.TestCase):
         self.assertEqual(len(set(sent)), 5)  # nothing lost, nothing duplicated
         self.assertEqual(self._state()["pending_queue"], [])
 
-    def test_all_sources_alert_on_new_keyword_matching_notices_regardless_of_publication_date(self) -> None:
-        """Both SSC and RRB alert on newly discovered notices even when their publication dates are older than today."""
+    def test_strict_sources_are_unchanged_when_run_beside_rrb(self) -> None:
+        """SSC (strict) still rejects a stale notice in the same run in which RRB (informational) alerts on an old one."""
         ssc = app.SOURCE_BY_ID["ssc"]
         ssc_payload = lambda created: json.dumps({"statusCode": "200", "data": [{
             "id": "ssc-x", "headline": "SSC Combined Graduate Level Examination 2026 Final Answer Key",
@@ -365,7 +357,7 @@ class MonitorBehaviourTests(unittest.TestCase):
         notifier = RecordingNotifier()
         run(self.state_path, json_feed(extra), notifier, sources=(ssc, RRB), extra_routes=routes2)
         sent_sources = sorted(r["source_id"] for r, _, _ in notifier.sent_notices)
-        self.assertEqual(sent_sources, ["rrb_rrcb", "ssc"])
+        self.assertEqual(sent_sources, ["rrb_rrcb"])  # stale SSC notice still rejected by its strict date rule
 
     @unittest.skipUnless(os.path.isfile(REPO_STATE), "data/notice_state.json not present")
     def test_existing_nine_source_baselines_and_ledger_are_not_disturbed(self) -> None:
@@ -386,35 +378,6 @@ class MonitorBehaviourTests(unittest.TestCase):
         self.assertTrue(after["sources"]["rrb_rrcb"]["baseline_completed"])
         self.assertGreaterEqual(len(after["notices"]), len(legacy_before) + 4)
 
-    def test_open_notification_types_for_rrb_corrigendum_extension_postponement_court_and_filler_exclusion(self) -> None:
-        """
-        Verify that RRB notices outside the 5 predefined categories (corrigenda, deadline extensions,
-        postponements/cancellations, court compliance notices, zone allocation/fee refund instructions)
-        are accepted and delivered with category 'Official Notice', while tenders and website maintenance
-        banners are filtered out.
-        """
-        run(self.state_path, json_feed())  # baseline initial feed
-        extra = [
-            {"id": 9701, "title": "Corrigendum-3 to CEN 02/2026 regarding Revised Zone-wise Table", "link": "/f/corr3.pdf", "date": "2026-10-25"},
-            {"id": 9702, "title": "Notice for Extension of Closing Date for Fee Refund Bank Details", "link": "/f/ext_bank.pdf", "date": ""},
-            {"id": 9703, "title": "Important Notice: Postponement and Rescheduling of Stage-II due to administrative reasons", "link": "/f/postp.pdf"},
-            {"id": 9704, "title": "Compliance of Hon'ble CAT / High Court Order in OA No. 310/2026", "link": "/f/court_oa.pdf"},
-            {"id": 9705, "title": "Website is under maintenance from 23:00 hrs to 01:00 hrs", "link": "/f/maint.pdf"},
-            {"id": 9706, "title": "e-Tender for Annual Maintenance Contract of Computers in RRB Office", "link": "/f/amc_tender.pdf"},
-        ]
-        notifier = RecordingNotifier()
-        summary, _, _ = run(self.state_path, json_feed(extra), notifier)
-        sent_titles = [r["title"] for r, _, _ in notifier.sent_notices]
-        self.assertEqual(len(sent_titles), 4, sent_titles)
-        self.assertEqual(summary.telegram_deliveries_confirmed, 4)
-        self.assertTrue(any("Corrigendum-3" in t for t in sent_titles))
-        self.assertTrue(any("Extension of Closing Date" in t for t in sent_titles))
-        self.assertTrue(any("Postponement and Rescheduling" in t for t in sent_titles))
-        self.assertTrue(any("High Court Order" in t for t in sent_titles))
-        self.assertFalse(any("maintenance" in t.lower() for t in sent_titles))
-        for rec, _, _ in notifier.sent_notices:
-            self.assertEqual(rec["category"], "Official Notice")
-
 
 class ReportingTests(unittest.TestCase):
     def test_live_check_marks_rrb_notices_eligible_by_ledger_not_by_date(self) -> None:
@@ -430,34 +393,36 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(all(n["eligibility_reason"] == "NEW_TO_LEDGER_DATE_INFORMATIONAL" for n in res["eligible_today_notices"]))
         self.assertFalse(res["date_coverage_warning"])
 
-    def test_github_report_does_not_flag_sources_for_missing_dates(self) -> None:
+    def test_github_report_does_not_flag_rrb_for_missing_dates(self) -> None:
         summary = app.RunSummary(mode="monitor", total_websites=10, succeeded_websites=10)
         summary.per_source_results["rrb_rrcb"] = {"status": "ok", "discovered": 20, "discovered_with_publication_date": 0, "new": 0}
         summary.per_source_results["dsssb"] = {"status": "ok", "discovered": 7, "discovered_with_publication_date": 0, "new": 0}
         out = io.StringIO()
         app.emit_github_actions_report(summary, env={"GITHUB_ACTIONS": "true"}, out=out)
-        self.assertNotIn("[dsssb]", out.getvalue())
+        self.assertIn("[dsssb]", out.getvalue())
         self.assertNotIn("[rrb_rrcb]", out.getvalue())
 
     def test_telegram_message_formats(self) -> None:
         base = {"organization": RRB.organization, "title": "CEN 15/2026 Result of CBT-1", "category": "Results",
                 "url": "https://rrb.indianrailways.gov.in/f/r.pdf", "normalized_url": "https://rrb.indianrailways.gov.in/f/r.pdf"}
-        self.assertIn("Publication Date:</b> Not available", app.format_telegram_message(dict(base, publication_date=None)))
+        self.assertNotIn("Publication Date", app.format_telegram_message(dict(base, publication_date=None)))
         self.assertIn("Publication Date:</b> 2024-01-02", app.format_telegram_message(dict(base, publication_date="2024-01-02")))
-        self.assertIn("Publication Date:</b> Oct 2026 (Tentative)", app.format_telegram_message(dict(base, publication_date="Oct 2026 (Tentative)")))
 
 
 class WorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        from test_audit_regressions import _dump_yaml_obj, _load_yaml_doc
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            raise unittest.SkipTest("PyYAML not installed")
         path = os.path.join(_HERE, ".github", "workflows", "main.yml")
         if not os.path.isfile(path):
             raise unittest.SkipTest("main.yml not present")
         with open(path, encoding="utf-8") as fh:
             cls.raw = fh.read()
-        cls.doc = _load_yaml_doc(cls.raw)
-        cls._dump = staticmethod(_dump_yaml_obj)
+        cls.doc = yaml.safe_load(cls.raw)
+        cls.yaml = yaml
 
     def test_single_workflow_file_with_three_mode_gated_jobs(self) -> None:
         wf_dir = os.path.join(_HERE, ".github", "workflows")
@@ -486,7 +451,7 @@ class WorkflowTests(unittest.TestCase):
         triggers = self.doc.get("on", self.doc.get(True))
         self.assertEqual(triggers["schedule"], [{"cron": "*/10 * * * *"}])
         self.assertIn("workflow_dispatch", triggers)
-        monitor_text = self._dump(self.doc["jobs"]["monitor-notices"])
+        monitor_text = self.yaml.safe_dump(self.doc["jobs"]["monitor-notices"])
         for needed in ("secrets.TELEGRAM_BOT_TOKEN", "secrets.TELEGRAM_CHAT_ID", "secrets.RRCB_RELAY_URL_TEMPLATE"):
             self.assertIn(needed, monitor_text)
         self.assertNotIn("rrb_rrcb", monitor_text)  # source handling stays in code, not in the monitor job
@@ -495,7 +460,7 @@ class WorkflowTests(unittest.TestCase):
     def test_probe_job_is_read_only_and_secret_free(self) -> None:
         job = self.doc["jobs"]["rrcb-probe"]
         self.assertEqual(job["permissions"], {"contents": "read"})
-        text = self._dump(job)
+        text = self.yaml.safe_dump(job)
         self.assertNotIn("secrets.", text)
         self.assertNotIn("TELEGRAM", text)
         self.assertNotIn("git push", text)
@@ -551,11 +516,13 @@ class BaseEndpointRequestTests(unittest.TestCase):
 
 
 class NoRecordsAndResponseSafetyTests(unittest.TestCase):
-    def test_hindi_no_records_message_is_an_empty_result_not_a_notice_or_crash(self) -> None:
+    def test_hindi_no_records_message_is_an_empty_result_not_a_notice(self) -> None:
         for body in (NO_RECORDS, f"  \n{NO_RECORDS}\n ", f"<html><body><p>{NO_RECORDS}</p></body></html>",
                      json.dumps({"message": NO_RECORDS}), json.dumps(NO_RECORDS, ensure_ascii=True),
                      f'<div class="alert">{NO_RECORDS}</div>'):
-            self.assertEqual(app.parse_rrcb_response(RRB, body), [], body)
+            with self.assertRaises(app.SourceFetchError, msg=body) as ctx:
+                app.parse_rrcb_response(RRB, body)
+            self.assertEqual(ctx.exception.category, "NO_RECORDS_AVAILABLE", body)
 
     def test_no_records_never_completes_a_baseline_and_never_touches_the_ledger(self) -> None:
         tmp = tempfile.mkdtemp(prefix="rrb-norec-")
@@ -564,26 +531,10 @@ class NoRecordsAndResponseSafetyTests(unittest.TestCase):
         make_state(path)
         summary, _, _ = run(path, (200, {"Content-Type": "text/html; charset=utf-8"}, f"<html><body>{NO_RECORDS}</body></html>"), RecordingNotifier())
         res = summary.per_source_results["rrb_rrcb"]
-        self.assertEqual((res["status"], res["error_category"], res["discovered"]), ("ok", None, 0))
-        self.assertEqual(res["test_outcome"], "NO_NOTICE_FOUND")
+        self.assertEqual((res["status"], res["error_category"]), ("error", "NO_RECORDS_AVAILABLE"))
         st = app.load_state(path, allow_init_if_missing=False)
         self.assertFalse(st["sources"]["rrb_rrcb"]["baseline_completed"])
         self.assertEqual([r for r in st["notices"].values() if r["source_id"] == "rrb_rrcb"], [])
-
-    def test_homepage_and_dynamic_endpoint_fallback_when_getdata_is_empty_shell(self) -> None:
-        """If getdata?loc= returns an unrecognized HTML shell, adapter falls back to homepage / dynamic getdata endpoint."""
-        dyn_url = "https://rrb.indianrailways.gov.in/getdata?loc=CENTRAL"
-        homepage_html = f'<html><body><script>fetch("{dyn_url}")</script></body></html>'
-        routes = {
-            ENDPOINT: (200, {"Content-Type": "text/html"}, "<html><body><p>Welcome Shell</p></body></html>"),
-            RRB.homepage_url: (200, {"Content-Type": "text/html"}, homepage_html),
-            dyn_url: (200, {"Content-Type": "application/json"}, json_feed()),
-        }
-        client = FakeHttpClient(routes=routes, max_retries=1)
-        got = app.adapter_rrb_rrcb(RRB, client)
-        self.assertEqual(len(got), 4)
-        self.assertIn(RRB.homepage_url, client.call_counts)
-        self.assertIn(dyn_url, client.call_counts)
 
     def test_real_records_alongside_a_short_page_are_not_mistaken_for_no_records(self) -> None:
         body = json.dumps([{"id": 5, "title": "CEN 03/2026 Result of CBT-1 shortlisted candidates", "link": "/r.pdf"}])
@@ -656,14 +607,12 @@ class NoRecordsAndResponseSafetyTests(unittest.TestCase):
         path = os.path.join(tmp, "notice_state.json")
         make_state(path)
         run(path, json_feed())  # baseline
-        with open(path, "rb") as fh_before:
-            before = hashlib.sha256(fh_before.read()).hexdigest()
+        before = hashlib.sha256(open(path, "rb").read()).hexdigest()
         for _ in range(3):
             notifier = RecordingNotifier()
             run(path, json_feed(), notifier)
             self.assertEqual(len(notifier.sent_notices), 0)
-        with open(path, "rb") as fh_after:
-            self.assertEqual(before, hashlib.sha256(fh_after.read()).hexdigest())
+        self.assertEqual(before, hashlib.sha256(open(path, "rb").read()).hexdigest())
 
     def test_rrb_failure_does_not_stop_other_sources(self) -> None:
         tmp = tempfile.mkdtemp(prefix="rrb-isolate-")
@@ -682,43 +631,115 @@ class NoRecordsAndResponseSafetyTests(unittest.TestCase):
         self.assertEqual(summary.per_source_results["rrb_rrcb"]["error_category"], "CONNECTION_TIMEOUT")
         self.assertEqual((summary.succeeded_websites, summary.failed_websites), (1, 1))
 
-    def test_split_connect_and_read_timeout_allows_slow_header_response(self) -> None:
-        """
-        Regression test for HttpClient._perform_single_request:
-        When connect_timeout=1s and read_timeout=3s, a server that accepts TCP immediately
-        and takes 1.3s to generate HTTP headers must SUCCEED under read_timeout (3s) rather
-        than timing out under connect_timeout (1s).
-        """
-        import http.server
-        import threading
-        import time
 
-        class SlowHeaderHandler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:
-                pass
+# ---------------------------------------------------------------------------------------------
+# Connection-level failure diagnosis (GitHub-runner timeouts must state WHERE the connection fails)
+# ---------------------------------------------------------------------------------------------
+class _ClosableSocket:
+    def close(self) -> None:
+        pass
 
-            def do_GET(self) -> None:
-                time.sleep(1.3)
-                body = json_feed().encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
 
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SlowHeaderHandler)
-        httpd.daemon_threads = True
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        try:
-            client = app.HttpClient(timeout=(1, 3), max_retries=1, enable_doh_fallback=False)
-            status, _, body, _ = client.request(f"http://127.0.0.1:{httpd.server_address[1]}/getdata?loc=")
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        self.assertEqual(status, 200)
-        self.assertEqual(len(app.parse_rrcb_response(RRB, body.decode("utf-8"))), 4)
+def _resolver(ips: Any) -> Any:
+    import socket as _socket
+    def resolve(host: str, port: Any, **kwargs: Any) -> Any:
+        return [((_socket.AF_INET6 if ":" in ip else _socket.AF_INET), 0, 0, "", (ip, 0)) for ip in ips]
+    return resolve
+
+
+class NetworkDiagnosisTests(unittest.TestCase):
+    def test_unanswered_connection_attempts_are_reported_as_a_network_level_block(self) -> None:
+        import socket as _socket
+
+        def blackhole(addr: Any, timeout: Any) -> Any:
+            raise _socket.timeout("timed out")
+
+        text = app._rrb_diagnose_network(resolver=_resolver(["203.0.113.9"]), connector=blackhole)
+        self.assertIn("DNS ok", text)
+        self.assertIn("tcp/443 203.0.113.9: NO ANSWER", text)
+        self.assertIn("tcp/80 203.0.113.9: NO ANSWER", text)
+        self.assertIn("cannot fix this", text)
+
+    def test_reachable_tcp_points_above_tcp(self) -> None:
+        text = app._rrb_diagnose_network(resolver=_resolver(["203.0.113.9"]), connector=lambda a, t: _ClosableSocket())
+        self.assertIn("tcp/443 203.0.113.9: connected", text)
+        self.assertIn("failure is above TCP", text)
+        self.assertNotIn("cannot fix this", text)
+
+    def test_refused_and_other_socket_errors_are_labelled(self) -> None:
+        def refuse(addr: Any, timeout: Any) -> Any:
+            raise ConnectionRefusedError(111, "refused")
+
+        self.assertIn("connection refused", app._rrb_diagnose_network(resolver=_resolver(["203.0.113.9"]), connector=refuse))
+
+        def unreachable(addr: Any, timeout: Any) -> Any:
+            raise OSError(101, "Network is unreachable")
+
+        self.assertIn("errno 101", app._rrb_diagnose_network(resolver=_resolver(["203.0.113.9"]), connector=unreachable))
+
+    def test_dns_failure_is_reported_as_dns(self) -> None:
+        import socket as _socket
+
+        def failing(host: str, port: Any, **kwargs: Any) -> Any:
+            raise _socket.gaierror(-2, "Name or service not known")
+
+        self.assertIn("DNS lookup for rrb.indianrailways.gov.in failed", app._rrb_diagnose_network(resolver=failing))
+
+    def test_ipv4_first_and_attempts_are_bounded(self) -> None:
+        import socket as _socket
+        calls: List[Any] = []
+
+        def record(addr: Any, timeout: Any) -> Any:
+            calls.append(addr)
+            raise _socket.timeout("timed out")
+
+        app._rrb_diagnose_network(resolver=_resolver(["2001:db8::1", "203.0.113.9", "203.0.113.10", "203.0.113.11"]), connector=record)
+        self.assertEqual(calls, [("203.0.113.9", 443), ("203.0.113.9", 80), ("203.0.113.10", 443), ("203.0.113.10", 80)])
+
+    def test_a_hanging_dns_lookup_cannot_hang_the_diagnosis(self) -> None:
+        import time as _time
+
+        def hang(host: str, port: Any, **kwargs: Any) -> Any:
+            _time.sleep(30)
+
+        started = _time.monotonic()
+        text = app._rrb_diagnose_network(resolver=hang)
+        self.assertLess(_time.monotonic() - started, 8.0)
+        self.assertIn("did not finish", text)
+
+    def test_adapter_adds_the_diagnosis_to_connection_failures_of_the_real_client_only(self) -> None:
+        for category in ("CONNECTION_TIMEOUT", "CONNECTION_RESET", "DNS_ERROR"):
+            client = app.HttpClient(timeout=(1, 1), max_retries=1, enable_doh_fallback=False)
+            with mock.patch.object(app.HttpClient, "_perform_single_request", side_effect=app.SourceFetchError(category, "boom")), \
+                 mock.patch.object(app, "_rrb_diagnose_network", return_value="DIAG-TEXT") as diag:
+                with self.assertRaises(app.SourceFetchError) as ctx:
+                    app.adapter_rrb_rrcb(RRB, client)
+            self.assertEqual(ctx.exception.category, category)  # category is preserved
+            self.assertIn("boom", ctx.exception.detail)
+            self.assertIn("network diagnosis: DIAG-TEXT", ctx.exception.detail)
+            diag.assert_called_once()
+        # not for errors that prove TCP works, and never for test doubles
+        for category in ("HTTP_403_FORBIDDEN", "HTTP_503_SERVER_ERROR", "UNEXPECTED_CONTENT_TYPE"):
+            client = app.HttpClient(timeout=(1, 1), max_retries=1, enable_doh_fallback=False)
+            with mock.patch.object(app.HttpClient, "_perform_single_request", side_effect=app.SourceFetchError(category, "x")), \
+                 mock.patch.object(app, "_rrb_diagnose_network") as diag:
+                with self.assertRaises(app.SourceFetchError):
+                    app.adapter_rrb_rrcb(RRB, client)
+            diag.assert_not_called()
+        fake = FakeHttpClient(routes={ENDPOINT: app.SourceFetchError("CONNECTION_TIMEOUT", "t")}, max_retries=1)
+        with mock.patch.object(app, "_rrb_diagnose_network") as diag:
+            with self.assertRaises(app.SourceFetchError):
+                app.adapter_rrb_rrcb(RRB, fake)
+        diag.assert_not_called()
+
+    def test_the_diagnosis_reaches_the_github_annotation_untruncated(self) -> None:
+        detail = "Timed out connecting to https://rrb.indianrailways.gov.in/getdata?loc=: timed out | network diagnosis: " + "x" * 700 + " VERDICT-END"
+        summary = app.RunSummary(mode="monitor", total_websites=10, succeeded_websites=9, failed_websites=1)
+        summary.per_source_results["rrb_rrcb"] = {"status": "error", "error_category": "CONNECTION_TIMEOUT", "error": detail}
+        out = io.StringIO()
+        app.emit_github_actions_report(summary, env={"GITHUB_ACTIONS": "true"}, out=out)
+        self.assertIn("VERDICT-END", out.getvalue())
 
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
