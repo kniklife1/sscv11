@@ -63,7 +63,7 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
-DEFAULT_TIMEOUT = (10, 20)  # (connect_timeout, read_timeout) in seconds
+DEFAULT_TIMEOUT = (6, 10)  # (connect_timeout, read_timeout) in seconds
 MAX_HTTP_RETRIES = 2
 # Hard wall-clock ceiling for ONE HTTP attempt (connect + TLS + headers + full body). The
 # socket-level (connect, read) timeouts above apply per socket operation and per resolved
@@ -71,7 +71,7 @@ MAX_HTTP_RETRIES = 2
 DEFAULT_REQUEST_DEADLINE_SECONDS = 30.0
 # Total wall-clock budget for ALL requests made on behalf of one source in one run.
 DEFAULT_SOURCE_BUDGET_SECONDS = 90.0
-MAX_SOURCE_CONCURRENCY = 10
+MAX_SOURCE_CONCURRENCY = 9
 MAX_CONCURRENT_SOURCES = MAX_SOURCE_CONCURRENCY
 MAX_TELEGRAM_RETRIES = 3
 MAX_TELEGRAM_MESSAGE_LENGTH = 4000
@@ -227,9 +227,9 @@ class SourceConfig:
     notice_urls: Tuple[str, ...]
     adapter_name: str
     notes: str = ""
-    # "informational": publication date is extracted and displayed when available (or preserved/fallback
-    # shown), and NEVER rejects or suppresses a notice on any source.
-    date_policy: str = "informational"
+    # "strict": publication date is mandatory and must be within the configured IST window (all original
+    # sources). "informational": the date is only displayed when parseable; it never rejects a notice.
+    date_policy: str = "strict"
 
 
 @dataclasses.dataclass
@@ -421,9 +421,7 @@ SOURCE_BY_ID: Dict[str, SourceConfig] = {s.source_id: s for s in SOURCES}
 def source_date_is_informational(source_id: str) -> bool:
     """True when this source's publication date is display-only and must never reject a notice."""
     src = SOURCE_BY_ID.get(str(source_id or ""))
-    if src is None:
-        return True
-    return bool(src.date_policy == "informational")
+    return bool(src is not None and src.date_policy == "informational")
 
 # Websites removed from active monitoring (7 removed earlier + 3 removed in 9-site reduction: crpf, cisf, ssb):
 REMOVED_SOURCE_IDS: frozenset[str] = frozenset(
@@ -860,64 +858,20 @@ IRRELEVANT_NOTICE_RE = re.compile(
     r"\b(?:"
     r"e?[-\s]*tender(?:s|ing)?|notice\s+inviting\s+tender|nit\s+no|rfp|rfq|gem\s+bid|"
     r"bid\s+document|sealed\s+quotation|quotation\s+for|procurement\s+of|auction\s+notice|"
-    r"public\s+auction|e[-\s]*auction|empanelment\s+of\s+(?:firm|vendor|agency|hospital|hotel|lab|private)|"
+    r"public\s+auction|e[-\s]*auction|empanelment\s+of\s+(?:firm|vendor|agency|hospital|hotel|lab)|"
     r"annual\s+maintenance\s+contract|supply\s+and\s+installation|purchase\s+of\s+equipment|"
     r"earnest\s+money|security\s+deposit|"
     r"transfer\s+(?:and|&)\s+posting|posting\s+and\s+transfer|transfer\s+order|posting\s+order|"
     r"routine\s+transfer|inter[-\s]*commissionerate\s+transfer|deputation\s+to\s+the\s+post\s+of\s+chief\s+vigilance|"
-    r"sanction\s+of\s+leave|grant\s+of\s+leave|"
     r"seniority\s+list|gradation\s+list|civil\s+list|disposition\s+list|"
     r"pension\s+adalat|family\s+pension|compassionate\s+appointment|"
     r"immovable\s+property\s+return|annual\s+property\s+return|apar\s+grading|"
     r"medical\s+reimbursement|cghs\s+empanelment|ltc\s+claim|"
-    r"gazetted\s+holiday|list\s+of\s+holidays|holiday\s+calendar|public\s+holidays?\s+for\s+calendar\s+year|"
-    r"flag\s+code\s+of\s+india|citizen'?s?\s+charter|annual\s+report(?:\s+20\d{2})?|"
+    r"gazetted\s+holiday|list\s+of\s+holidays|holiday\s+calendar|"
+    r"flag\s+code\s+of\s+india|citizen'?s?\s+charter|annual\s+report\s+20\d{2}|"
     r"suo\s+motu\s+disclosure|right\s+to\s+information\s+manual|"
     r"memorandum\s+of\s+understanding|signing\s+of\s+mou"
     r")\b",
-    re.IGNORECASE,
-)
-
-WEBSITE_BOILERPLATE_RE = re.compile(
-    r"(?:"
-    r"\bwelcome\s+to\s+(?:the\s+)?official\s+(?:website|portal|web\s+portal)\b|"
-    r"\b(?:website|portal|site|server)\s+(?:is\s+)?under\s+(?:maintenance|construction|updation)\b|"
-    r"\bscheduled\s+(?:system\s+|server\s+|website\s+)?maintenance\b|"
-    r"\bportal\s+will\s+remain\s+closed\s+for\s+maintenance\b|"
-    r"\bbest\s+viewed\s+in\s+(?:chrome|firefox|edge|internet\s+explorer|safari|resolution)\b|"
-    r"\ball\s+rights\s+reserved\b|"
-    r"\bcopyright\s*(?:©|\(c\)|20\d{2})\b|"
-    r"\bskip\s+to\s+(?:main\s+content|navigation)\b|"
-    r"\bscreen\s+reader\s+access\b|"
-    r"\b(?:privacy\s+policy|hyperlink\s+policy|copyright\s+policy|terms\s+and\s+conditions|terms\s+of\s+use)\b|"
-    r"\b(?:photo\s+gallery|video\s+gallery|image\s+gallery|visitor\s+counter)\b|"
-    r"\b(?:who'?s\s+who|organization\s+chart|organizational\s+structure|directory\s+of\s+officers)\b|"
-    r"^\s*(?:home|about\s+us|contact\s+us|sitemap|feedback|help|faqs?|disclaimer|downloads?|login|register)\s*(?:\|\s*(?:home|about\s+us|contact\s+us|sitemap|feedback|help|faqs?|disclaimer|downloads?|login|register)\s*)*$|"
-    r"^\s*disclaimer\s*:\s*(?:the\s+)?contents?\s+(?:owned|maintained|provided|of\s+this\s+website)\b"
-    r")",
-    re.IGNORECASE,
-)
-
-OFFICIAL_NOTIFICATION_SIGNAL_RE = re.compile(
-    r"(?:"
-    r"\b(?:"
-    r"corrigend(?:um|a)|addend(?:um|a)|errat(?:a|um)|amendment|modification|revised|revision|"
-    r"extension|extended|last\s+date|closing\s+date|correction\s+window|edit\s+window|"
-    r"cancellation|cancelled|canceled|postponement|postponed|rescheduled|rescheduling|deferred|withdrawn|withdrawal|abeyance|"
-    r"court\s+order|high\s+court|supreme\s+court|tribunal|cat\s+order|writ\s+petition|contempt|compliance|"
-    r"syllabus|scheme\s+of|exam\s+pattern|omr|question\s+paper|objection(?:s)?|representation(?:s)?|challenge|"
-    r"counselling|counseling|choice\s+filling|option\s+form|preference|allocation|allotment|"
-    r"joining|appointment|panel|replacement\s+panel|additional\s+panel|waiting\s+list|reserve\s+list|"
-    r"scrutiny|dossier|e[-\s]*dossier|debarred|biometric|scribe|compensatory\s+time|"
-    r"fee\s+refund|bank\s+details|normalization|percentile|relaxation|qualification|"
-    r"otr|one\s+time\s+registration|helpline|helpdesk|grievance|"
-    r"cen\b|advt\b|advertisement|notice\b|notification\b|circular\b|press\s+note|press\s+release|"
-    r"memorandum|communique|bulletin|brochure|prospectus|instructions?|guidelines?|advisory|"
-    r"file\s*no|f\.\s*no|letter\s*no|ref\s*no"
-    r")\b|"
-    r"(?:शुद्धिपत्र|संशोधन|संशोधित|विस्तार|अंतिम\s+तिथि|आपत्ति|निरस्त|स्थगित|न्यायालय|आदेश|"
-    r"पाठ्यक्रम|काउंसलिंग|आवंटन|पैनल|सूचना|अधिसूचना|विज्ञप्ति|प्रेस\s+नोट|परिपत्र|निर्देश)"
-    r")",
     re.IGNORECASE,
 )
 
@@ -1075,17 +1029,12 @@ def load_keyword_categories(
 
 def is_irrelevant_notice_context(title: str, content: str = "", url: str = "") -> bool:
     """
-    Returns True when an item is generic website boilerplate, navigation/footer filler,
-    maintenance banner, procurement/tender/auction, or routine internal staff administration
-    (transfer/posting, seniority list, leave sanction) that must never trigger a job notification.
+    Returns True when a notice is an administrative, procurement, tender, auction,
+    staff transfer/posting, seniority list, pension, holiday, RTI, or media notice
+    that must never trigger a job notification.
     """
-    cleaned_title = clean_display_title(title)
-    combined_text = f"{cleaned_title} {clean_display_title(content)}".strip()
-    if not combined_text or len(cleaned_title) < 8:
-        return True
-    if cleaned_title.lower() in globals().get("IGNORED_EXACT_TITLES", ()):
-        return True
-    if WEBSITE_BOILERPLATE_RE.search(cleaned_title) or WEBSITE_BOILERPLATE_RE.search(combined_text):
+    combined_text = f"{title} {content}".strip()
+    if not combined_text:
         return True
     if IRRELEVANT_NOTICE_RE.search(combined_text):
         return True
@@ -1142,17 +1091,9 @@ def match_notice_keywords(
     categories: Optional[Dict[str, Sequence[str]]] = None,
 ) -> Tuple[bool, Optional[str], List[str]]:
     """
-    Evaluates whether a discovered item is a genuine official notification and classifies its
-    display category:
-    - First checks configured categories (Recruitment, Examination, Results, Answer Keys,
-      Next Stages, or any custom categories) so specific categories are assigned when matched.
-    - Never rejects a genuine official notification merely because its notification type or
-      category was not in the predefined 5-category list: corrigenda, addenda, errata,
-      revised notices, deadline extensions, cancellations, postponements, court orders,
-      counselling/allocation/panel updates, or any other official notification discovered from
-      a notice board or official document link are accepted with fallback category 'Official Notice'.
-    - Continues to reject generic website boilerplate, navigation links, maintenance banners,
-      tenders/auctions/procurement, and unrelated internal staff/postal/holiday/media filler.
+    Evaluates whether a notice matches at least one configured keyword from the 5
+    official categories (Recruitment, Examination, Results, Answer Keys, Next Stages)
+    using word boundaries and contextual false-positive checks.
 
     Returns: (is_relevant, matched_category, matched_keywords)
     """
@@ -1160,14 +1101,6 @@ def match_notice_keywords(
         return False, None, []
 
     combined_raw = f"{title} {content}".strip()
-    if AMBIGUOUS_NOTIFICATION_NEGATIVE_RE.search(combined_raw):
-        return False, None, []
-    if AMBIGUOUS_DV_NEGATIVE_RE.search(combined_raw):
-        return False, None, []
-    if AMBIGUOUS_INTERVIEW_NEGATIVE_RE.search(combined_raw):
-        return False, None, []
-    if AMBIGUOUS_POSTS_NEGATIVE_RE.search(combined_raw) and not _passes_ambiguous_keyword_context("posts", combined_raw):
-        return False, None, []
     norm_text = _normalize_for_keyword_search(combined_raw)
     if not norm_text:
         return False, None, []
@@ -1195,50 +1128,30 @@ def match_notice_keywords(
                 if kw not in all_matched_kws:
                     all_matched_kws.append(kw)
 
-    if matched_by_cat:
-        # Choose the most specific category according to CATEGORY_PRECEDENCE
-        chosen_category = next(c for c in ordered_cats if c in matched_by_cat)
-        if (
-            chosen_category == "Examination"
-            and "Recruitment" in matched_by_cat
-            and re.search(
-                r"\b(?:new\s+vacancy|current\s+vacancy|ongoing\s+recruitment|recruitment\s+for|advertisement\s+for|recruitment\s+advertisement|direct\s+recruitment)\b",
-                combined_raw,
-                re.IGNORECASE,
-            )
-            and not re.search(
-                r"\b(?:admit\s*card|hall\s*ticket|city\s+intimation|call\s+letter|exam(?:ination)?\s+schedule|schedule\s+of|time\s*table|exam(?:ination)?\s+date)\b",
-                combined_raw,
-                re.IGNORECASE,
-            )
-        ):
-            chosen_category = "Recruitment"
+    if not matched_by_cat:
+        return False, None, []
 
-        return True, chosen_category, all_matched_kws
+    # Choose the most specific category according to CATEGORY_PRECEDENCE
+    # Special case: if 'Recruitment' matched an explicit recruitment/vacancy/advertisement phrase
+    # and 'Examination' only matched generic 'examination', prefer 'Recruitment' when title starts with Advt/Recruitment/Current Vacancy/Ongoing Recruitment
+    chosen_category = next(c for c in ordered_cats if c in matched_by_cat)
+    if (
+        chosen_category == "Examination"
+        and "Recruitment" in matched_by_cat
+        and re.search(
+            r"\b(?:new\s+vacancy|current\s+vacancy|ongoing\s+recruitment|recruitment\s+for|advertisement\s+for|recruitment\s+advertisement|direct\s+recruitment)\b",
+            combined_raw,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"\b(?:admit\s*card|hall\s*ticket|city\s+intimation|call\s+letter|exam(?:ination)?\s+schedule|schedule\s+of|time\s*table|exam(?:ination)?\s+date)\b",
+            combined_raw,
+            re.IGNORECASE,
+        )
+    ):
+        chosen_category = "Recruitment"
 
-    # Open-category acceptance for any genuine official notification outside the 5 predefined categories
-    official_matches: List[str] = []
-    for m in OFFICIAL_NOTIFICATION_SIGNAL_RE.finditer(combined_raw):
-        tok = clean_display_title(m.group(0)).lower()
-        if tok in AMBIGUOUS_KEYWORDS and not _passes_ambiguous_keyword_context(tok, combined_raw):
-            continue
-        if tok and tok not in official_matches:
-            official_matches.append(tok)
-
-    if not official_matches and POSITIVE_JOB_CONTEXT_RE.search(combined_raw):
-        for m in POSITIVE_JOB_CONTEXT_RE.finditer(combined_raw):
-            tok = clean_display_title(m.group(0)).lower()
-            if tok and tok not in official_matches:
-                official_matches.append(tok)
-
-    if not official_matches and url and _is_direct_document_url(url):
-        if len(clean_display_title(title)) >= 12:
-            official_matches.append("official_document")
-
-    if official_matches:
-        return True, "Official Notice", official_matches
-
-    return False, None, []
+    return True, chosen_category, all_matched_kws
 
 
 def is_relevant_job_notice(
@@ -1637,69 +1550,6 @@ def format_canonical_date(date_str: Optional[str]) -> Optional[str]:
     if key is None:
         return None
     return f"{key[0]:04d}-{key[1]:02d}-{key[2]:02d}"
-
-
-_PLACEHOLDER_DATE_TOKENS: Set[str] = {
-    "",
-    "none",
-    "null",
-    "n/a",
-    "na",
-    "nil",
-    "-",
-    "--",
-    "---",
-    "tba",
-    "tbd",
-    "not available",
-    "undefined",
-    "notice",
-    "download",
-    "view",
-    "click here",
-}
-
-
-def normalize_or_preserve_publication_date(raw_date: Any) -> Optional[str]:
-    """
-    Normalizes a publication date to YYYY-MM-DD when unambiguously parseable.
-    When normalization is uncertain (e.g. partial date, unusual separator, or raw text
-    containing digits), preserves the cleaned original date text rather than dropping it.
-    Returns None when no date is present or the token is a non-date placeholder.
-    Never fabricates or substitutes today's date.
-    """
-    if raw_date is None or isinstance(raw_date, bool):
-        return None
-    if isinstance(raw_date, (int, float)):
-        seconds = float(raw_date) / 1000.0 if float(raw_date) > 1e11 else float(raw_date)
-        if seconds < 631152000 or seconds > 4102444800:  # 1990..2100
-            return None
-        return datetime.datetime.fromtimestamp(seconds, IST_TIMEZONE).date().isoformat()
-
-    cleaned = re.sub(r"<[^>]+>", " ", html.unescape(str(raw_date)))
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned or cleaned.casefold() in _PLACEHOLDER_DATE_TOKENS:
-        return None
-
-    canonical = format_canonical_date(cleaned)
-    if canonical:
-        return canonical
-
-    extracted = extract_explicit_date(cleaned)
-    if extracted:
-        canonical_ext = format_canonical_date(extracted)
-        if canonical_ext:
-            return canonical_ext
-
-    # Reject calendar-impossible 4-digit-year numeric dates (e.g. 31-02-2026, 2026-02-30, 99/99/2026)
-    if re.match(r"^(?:\d{1,2}[-/.]\d{1,2}[-/.]20\d{2}|20\d{2}[-/.]\d{1,2}[-/.]\d{1,2})$", cleaned):
-        return None
-
-    # If the string contains digits (e.g. "Oct 2026", "15/10/26", "Q4 2026"),
-    # preserve the original date text rather than dropping it.
-    if any(ch.isdigit() for ch in cleaned):
-        return cleaned[:80]
-    return None
 
 
 def parse_official_date_token(date_str: Optional[str]) -> Optional[datetime.date]:
@@ -2338,132 +2188,56 @@ def _connect_pinned(
     raise last_exc if last_exc is not None else OSError("no pinned addresses available")
 
 
-class _SplitTimeoutHTTPConnection(http.client.HTTPConnection):
-    """Applies connect_timeout to TCP connection establishment, then switches socket to read_timeout."""
-
-    def __init__(self, *args: Any, read_timeout: Optional[int] = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._read_timeout = read_timeout
-
-    def connect(self) -> None:
-        super().connect()
-        if self._read_timeout is not None and self.sock is not None:
-            self.sock.settimeout(self._read_timeout)
-
-
-class _SplitTimeoutHTTPSConnection(http.client.HTTPSConnection):
-    """Applies connect_timeout to TCP + TLS handshake, then switches socket to read_timeout before HTTP response headers."""
-
-    def __init__(self, *args: Any, read_timeout: Optional[int] = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._read_timeout = read_timeout
-
-    def connect(self) -> None:
-        super().connect()
-        if self._read_timeout is not None and self.sock is not None:
-            self.sock.settimeout(self._read_timeout)
-
-
-class _SplitTimeoutHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, read_timeout: int) -> None:
-        super().__init__()
-        self._read_timeout = read_timeout
-
-    def http_open(self, req: urllib.request.Request) -> Any:
-        return self.do_open(
-            lambda h, **kw: _SplitTimeoutHTTPConnection(h, read_timeout=self._read_timeout, **kw),
-            req,
-        )
-
-
-class _SplitTimeoutHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, context: ssl.SSLContext, read_timeout: int) -> None:
-        super().__init__(context=context)
-        self._ctx = context
-        self._read_timeout = read_timeout
-
-    def https_open(self, req: urllib.request.Request) -> Any:
-        return self.do_open(
-            lambda h, **kw: _SplitTimeoutHTTPSConnection(h, read_timeout=self._read_timeout, **kw),
-            req,
-            context=self._ctx,
-        )
-
-
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     """HTTP connection that dials pinned IPs instead of resolving the hostname."""
 
-    def __init__(
-        self, *args: Any, pinned_ips: Sequence[str] = (), read_timeout: Optional[int] = None, **kwargs: Any
-    ) -> None:
+    def __init__(self, *args: Any, pinned_ips: Sequence[str] = (), **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pinned_ips = tuple(pinned_ips)
-        self._read_timeout = read_timeout
 
     def connect(self) -> None:
         self.sock = _connect_pinned(self._pinned_ips, self.port, self.timeout, self.source_address)
-        if self._read_timeout is not None and self.sock is not None:
-            self.sock.settimeout(self._read_timeout)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS connection that dials pinned IPs while keeping SNI + certificate/hostname verification
     bound to the ORIGINAL hostname (strict TLS verification stays fully active)."""
 
-    def __init__(
-        self, *args: Any, pinned_ips: Sequence[str] = (), read_timeout: Optional[int] = None, **kwargs: Any
-    ) -> None:
+    def __init__(self, *args: Any, pinned_ips: Sequence[str] = (), **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pinned_ips = tuple(pinned_ips)
-        self._read_timeout = read_timeout
 
     def connect(self) -> None:
         raw_sock = _connect_pinned(self._pinned_ips, self.port, self.timeout, self.source_address)
         self.sock = self._context.wrap_socket(raw_sock, server_hostname=self.host)  # type: ignore[attr-defined]
-        if self._read_timeout is not None and self.sock is not None:
-            self.sock.settimeout(self._read_timeout)
 
 
 class _PinnedHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, pins: Dict[str, Tuple[str, ...]], read_timeout: Optional[int] = None) -> None:
+    def __init__(self, pins: Dict[str, Tuple[str, ...]]) -> None:
         super().__init__()
         self._pins = pins
-        self._read_timeout = read_timeout
 
     def http_open(self, req: urllib.request.Request) -> Any:
         host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
         ips = self._pins.get(host)
         if not ips:
-            return self.do_open(
-                lambda h, **kw: _SplitTimeoutHTTPConnection(h, read_timeout=self._read_timeout, **kw), req
-            )
-        return self.do_open(
-            lambda h, **kw: _PinnedHTTPConnection(h, pinned_ips=ips, read_timeout=self._read_timeout, **kw), req
-        )
+            return self.do_open(http.client.HTTPConnection, req)
+        return self.do_open(lambda h, **kw: _PinnedHTTPConnection(h, pinned_ips=ips, **kw), req)
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(
-        self, pins: Dict[str, Tuple[str, ...]], context: ssl.SSLContext, read_timeout: Optional[int] = None
-    ) -> None:
+    def __init__(self, pins: Dict[str, Tuple[str, ...]], context: ssl.SSLContext) -> None:
         super().__init__(context=context)
         self._pins = pins
         self._pin_ctx = context
-        self._read_timeout = read_timeout
 
     def https_open(self, req: urllib.request.Request) -> Any:
         host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
         ips = self._pins.get(host)
         if not ips:
-            return self.do_open(
-                lambda h, **kw: _SplitTimeoutHTTPSConnection(h, read_timeout=self._read_timeout, **kw),
-                req,
-                context=self._pin_ctx,
-            )
+            return self.do_open(http.client.HTTPSConnection, req, context=self._pin_ctx)
         return self.do_open(
-            lambda h, **kw: _PinnedHTTPSConnection(h, pinned_ips=ips, read_timeout=self._read_timeout, **kw),
-            req,
-            context=self._pin_ctx,
+            lambda h, **kw: _PinnedHTTPSConnection(h, pinned_ips=ips, **kw), req, context=self._pin_ctx
         )
 
 
@@ -2679,17 +2453,6 @@ class HttpClient:
         assert last_exc is not None
         raise last_exc
 
-    def get_response(
-        self,
-        url: str,
-        method: str = "GET",
-        headers: Optional[Dict[str, str]] = None,
-        data: Optional[bytes] = None,
-        extra_headers: Optional[Dict[str, str]] = None,
-    ) -> Tuple[int, Dict[str, str], bytes, str]:
-        """Alias for request() returning (status_code, response_headers, body_bytes, final_url)."""
-        return self.request(url=url, method=method, headers=headers, data=data, extra_headers=extra_headers)
-
     def _compute_backoff(self, attempt: int, retry_after_header: Optional[str]) -> float:
         if retry_after_header:
             try:
@@ -2716,8 +2479,7 @@ class HttpClient:
         ctx = self._create_ssl_context()
         opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self._cookie_jar),
-            _SplitTimeoutHTTPHandler(read_timeout=read_timeout),
-            _SplitTimeoutHTTPSHandler(context=ctx, read_timeout=read_timeout),
+            urllib.request.HTTPSHandler(context=ctx),
         )
 
         def _do_open(active_opener: Any = opener) -> Tuple[int, Dict[str, str], bytes, str]:
@@ -2753,8 +2515,8 @@ class HttpClient:
                 pins = {h: tuple(doh_ips) for h in matching_hosts}
                 pinned_opener = urllib.request.build_opener(
                     urllib.request.HTTPCookieProcessor(self._cookie_jar),
-                    _PinnedHTTPSHandler(pins=pins, context=ctx, read_timeout=read_timeout),
-                    _PinnedHTTPHandler(pins=pins, read_timeout=read_timeout),
+                    _PinnedHTTPSHandler(pins=pins, context=ctx),
+                    _PinnedHTTPHandler(pins=pins),
                 )
                 return _do_open(pinned_opener)
         except urllib.error.HTTPError as exc:
@@ -4007,6 +3769,91 @@ def _rrb_decode(body: bytes, ctype: str) -> str:
             return body.decode("utf-8", errors="replace")
 
 
+_RRB_DIAGNOSABLE_CATEGORIES = {"CONNECTION_TIMEOUT", "CONNECTION_RESET", "DNS_ERROR", "NETWORK_ERROR", "REQUEST_DEADLINE_EXCEEDED"}
+
+
+def _rrb_diagnose_network(
+    host: str = "rrb.indianrailways.gov.in",
+    ports: Sequence[int] = (443, 80),
+    connect_timeout: float = 3.5,
+    max_addresses: int = 2,
+    resolver: Optional[Callable[..., Any]] = None,
+    connector: Optional[Callable[..., Any]] = None,
+) -> str:
+    """
+    Pinpoints WHERE a connection-level failure happens (DNS / TCP / TLS) so that the run's own annotation states the
+    real cause without needing the logs. Runs only after a connection-level failure, is bounded to roughly 15 seconds
+    (5 s DNS + at most `max_addresses` x `len(ports)` connects), opens no HTTP request and sends no data.
+    `resolver` / `connector` are injectable for tests.
+    """
+    resolve = resolver or socket.getaddrinfo
+    connect = connector or socket.create_connection
+    box: Dict[str, Any] = {}
+
+    def _lookup() -> None:
+        try:
+            box["infos"] = resolve(host, None, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            box["error"] = exc
+
+    started = time.monotonic()
+    worker = threading.Thread(target=_lookup, name="rrb-dns", daemon=True)
+    worker.start()
+    worker.join(5.0)
+    if worker.is_alive():
+        return f"DNS lookup for {host} did not finish within 5s"
+    if "error" in box:
+        return f"DNS lookup for {host} failed ({type(box['error']).__name__}: {box['error']})"
+    addresses: List[Tuple[Any, str]] = []
+    for family, _, _, _, sockaddr in box.get("infos", []):
+        if sockaddr[0] not in {ip for _, ip in addresses}:
+            addresses.append((family, sockaddr[0]))
+    addresses.sort(key=lambda item: item[0] != socket.AF_INET)  # IPv4 first (GitHub-hosted runners have no IPv6)
+    parts = [f"DNS ok in {time.monotonic() - started:.2f}s -> {', '.join(ip for _, ip in addresses[:6]) or 'no addresses'}"]
+    answered_443 = 0
+    silent_443 = 0
+    for _, ip in addresses[:max_addresses]:
+        for port in ports:
+            began = time.monotonic()
+            try:
+                sock = connect((ip, port), connect_timeout)
+            except (socket.timeout, TimeoutError):
+                parts.append(f"tcp/{port} {ip}: NO ANSWER within {connect_timeout:g}s")
+                silent_443 += 1 if port == 443 else 0
+                continue
+            except ConnectionRefusedError:
+                parts.append(f"tcp/{port} {ip}: connection refused")
+                continue
+            except OSError as exc:
+                parts.append(f"tcp/{port} {ip}: failed ({type(exc).__name__}, errno {exc.errno})")
+                continue
+            elapsed = time.monotonic() - began
+            answered_443 += 1 if port == 443 else 0
+            if port == 443 and connector is None:
+                try:
+                    tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+                    tls.settimeout(5.0)
+                    parts.append(f"tcp/443 {ip}: connected in {elapsed:.2f}s, TLS ok ({tls.version()})")
+                    tls.close()
+                except (OSError, ssl.SSLError) as exc:
+                    parts.append(f"tcp/443 {ip}: connected in {elapsed:.2f}s, TLS handshake failed ({type(exc).__name__}: {str(exc)[:60]})")
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            else:
+                parts.append(f"tcp/{port} {ip}: connected in {elapsed:.2f}s")
+                sock.close()
+    if answered_443:
+        parts.append("verdict: TCP/443 is reachable, so the failure is above TCP (TLS or HTTP)")
+    elif silent_443:
+        parts.append(
+            "verdict: the server does not answer TCP connection attempts from this network (typical of IP/geo filtering or a "
+            "firewall); changing the request, headers, URL or timeouts cannot fix this"
+        )
+    return "; ".join(parts)[:900]
+
+
 def _rrb_link_allowed(url: str) -> bool:
     """Official RRB portal, indianrailways.gov.in, rrbapply.gov.in and TCS iON (digialm.com) links only."""
     try:
@@ -4049,41 +3896,15 @@ def _rrb_first_url(value: Any) -> Optional[str]:
 
 
 def _rrb_json_date(value: Any) -> Optional[str]:
-    """Returns a canonical YYYY-MM-DD (Asia/Kolkata), preserved raw date text when uncertain, or None. Never invents a date."""
-    return normalize_or_preserve_publication_date(value)
-
-
-_RRB_EMPTY_COLLECTION_KEYS: Tuple[str, ...] = (
-    "data",
-    "notices",
-    "records",
-    "items",
-    "results",
-    "rows",
-    "list",
-    "noticeboard",
-    "notifications",
-)
-
-
-def _rrb_is_genuine_empty_json(payload: Any) -> bool:
-    """True when a parsed JSON payload explicitly represents an empty notice list (0 records) rather than an unknown/broken schema."""
-    if isinstance(payload, list):
-        return len(payload) == 0
-    if isinstance(payload, dict):
-        if not payload:
-            return False
-        norm_items = {_rrb_norm_key(k): v for k, v in payload.items()}
-        for key in _RRB_EMPTY_COLLECTION_KEYS:
-            if key in norm_items:
-                val = norm_items[key]
-                if isinstance(val, list) and len(val) == 0:
-                    return True
-                if isinstance(val, dict) and _rrb_is_genuine_empty_json(val):
-                    return True
-        if norm_items.get("count") == 0 or norm_items.get("total") == 0 or norm_items.get("totalrecords") == 0:
-            return True
-    return False
+    """Returns a canonical YYYY-MM-DD (Asia/Kolkata) or None. Never invents a date."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value) / 1000.0 if float(value) > 1e11 else float(value)
+        if seconds < 631152000 or seconds > 4102444800:  # 1990..2100
+            return None
+        return datetime.datetime.fromtimestamp(seconds, IST_TIMEZONE).date().isoformat()
+    return format_canonical_date(str(value))
 
 
 def _rrb_collect_json(node: Any, records: List[Dict[str, Any]], fragments: List[str], depth: int = 0) -> None:
@@ -4131,7 +3952,7 @@ def _rrb_build_notice(source: SourceConfig, title: str, url: Optional[str], pub_
         organization=source.organization,
         title=cleaned,
         url=resolved,
-        publication_date=normalize_or_preserve_publication_date(pub_date),
+        publication_date=pub_date,
         source_identifier=_rrb_make_identifier(resolved, cleaned, raw_id),
         raw_context=context or cleaned,
     )
@@ -4156,14 +3977,8 @@ def _rrb_notices_from_html(source: SourceConfig, html_text: str) -> List[Discove
         if (len(raw_title.strip()) < 12 or raw_title.strip().casefold() in generic) and anchor.row_text:
             raw_title = anchor.row_text
         pub = extract_explicit_date(anchor.row_text or "") or extract_explicit_date(raw_title)
-        notice = _rrb_build_notice(
-            source,
-            raw_title,
-            resolved,
-            normalize_or_preserve_publication_date(pub),
-            None,
-            anchor.row_text or raw_title,
-        )
+        notice = _rrb_build_notice(source, raw_title, resolved, format_canonical_date(pub) if pub else None, None,
+                                   anchor.row_text or raw_title)
         if notice is not None:
             out.append(notice)
     return out
@@ -4171,16 +3986,18 @@ def _rrb_notices_from_html(source: SourceConfig, html_text: str) -> List[Discove
 
 def parse_rrcb_response(source: SourceConfig, text: str) -> List[DiscoveredNotice]:
     """
-    Parses the RRCB `getdata` or unified portal response, which may be JSON (list or wrapped object),
-    an HTML table/list, or JSON carrying HTML fragments.
-    Distinguishes a genuine empty notice list (returns `[]`) from an empty 0-byte response,
-    an access-denied/challenge page, malformed JSON, or an unrecognized HTML shell (raises SourceFetchError).
+    Parses the RRCB `getdata` response, which may be JSON (list or wrapped object), an HTML table/list, or JSON
+    carrying HTML fragments. Raises SourceFetchError for challenge pages and unrecognised shapes; returns >=1 notice.
     """
     body = (text or "").strip()
     if not body:
         raise SourceFetchError("EMPTY_RESPONSE", "RRCB endpoint returned an empty body")
     if _rrb_is_no_records_message(body):
-        return []
+        raise SourceFetchError(
+            "NO_RECORDS_AVAILABLE",
+            "RRB endpoint answered that no records are available (empty result). It is not a notice and is not treated as a "
+            "valid feed, so a baseline is never completed from an empty response.",
+        )
     notices: List[DiscoveredNotice] = []
     fragments: List[str] = []
 
@@ -4189,29 +4006,20 @@ def parse_rrcb_response(source: SourceConfig, text: str) -> List[DiscoveredNotic
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
             raise SourceFetchError("INVALID_JSON", f"RRCB response looks like JSON but does not parse: {exc}") from exc
-        if _rrb_is_genuine_empty_json(payload):
-            return []
         records: List[Dict[str, Any]] = []
         _rrb_collect_json(payload, records, fragments)
         for rec in records:
             title = _rrb_pick(rec, _RRB_TITLE_KEYS)
             if not isinstance(title, str):
                 continue
-            raw_url = _rrb_first_url(_rrb_pick(rec, _RRB_URL_KEYS))
-            if not raw_url and "<a" in title.lower():
-                m_href = re.search(r'href=["\']([^"\']+)["\']', title, re.IGNORECASE)
-                if m_href:
-                    raw_url = m_href.group(1).strip()
             notice = _rrb_build_notice(
-                source, title, raw_url,
+                source, title, _rrb_first_url(_rrb_pick(rec, _RRB_URL_KEYS)),
                 _rrb_json_date(_rrb_pick(rec, _RRB_DATE_KEYS)), _rrb_pick(rec, _RRB_ID_KEYS), title,
             )
             if notice is not None:
                 notices.append(notice)
         if not notices:
             for frag in fragments:
-                if _rrb_is_no_records_message(frag) or is_recognized_empty_notice_board(frag):
-                    return []
                 notices.extend(_rrb_notices_from_html(source, frag))
     else:
         if is_access_denied_or_error_page(body):
@@ -4219,10 +4027,10 @@ def parse_rrcb_response(source: SourceConfig, text: str) -> List[DiscoveredNotic
         if is_unrendered_spa_shell(body):
             raise SourceFetchError("UNRECOGNIZED_STRUCTURE", "RRCB endpoint returned an unrendered application shell, not notice data")
         notices = _rrb_notices_from_html(source, body)
-        if not notices and is_recognized_empty_notice_board(body):
-            return []
 
     if not notices:
+        # Zero records is never treated as success: an empty first fetch would otherwise complete the baseline
+        # with nothing recorded and later announce the entire historical feed as new.
         raise SourceFetchError(
             "UNRECOGNIZED_STRUCTURE",
             f"RRCB response ({len(body)} bytes) contained no recognisable notice records; refusing to treat it as a valid empty feed.",
@@ -4230,123 +4038,48 @@ def parse_rrcb_response(source: SourceConfig, text: str) -> List[DiscoveredNotic
     return deduplicate_source_notices(notices, source)
 
 
-def _discover_rrcb_endpoints_from_homepage(html_text: str, base_url: str = "https://rrb.indianrailways.gov.in/") -> List[str]:
-    """Extracts any official rrb.indianrailways.gov.in getdata endpoints referenced in portal HTML/scripts."""
-    if not html_text:
-        return []
-    found: List[str] = []
-    for m in re.finditer(r'(["\']?)((?:https?://rrb\.indianrailways\.gov\.in)?/getdata\?loc=[A-Za-z0-9_-]*)\1', html_text, re.IGNORECASE):
-        resolved = urllib.parse.urljoin(base_url, m.group(2))
-        host = (urllib.parse.urlsplit(resolved).hostname or "").lower()
-        if host in RRB_PORTAL_HOSTS and resolved not in found:
-            found.append(resolved)
-    return found
-
-
-_rrb_extract_dynamic_endpoints = _discover_rrcb_endpoints_from_homepage
-
-
-def _rrb_relay_url(target_url: str = RRB_RRCB_ENDPOINT) -> Optional[str]:
+def _rrb_relay_url() -> Optional[str]:
     """Opt-in HTTPS relay (env RRCB_RELAY_URL_TEMPLATE containing '{url}'). Unset by default; never guessed."""
     template = os.environ.get("RRCB_RELAY_URL_TEMPLATE", "").strip()
     if template.startswith("https://") and "{url}" in template:
-        return template.replace("{url}", urllib.parse.quote(target_url, safe=""))
+        return template.replace("{url}", urllib.parse.quote(RRB_RRCB_ENDPOINT, safe=""))
     return None
 
 
-def _fetch_rrcb_payload(
-    client: HttpClient,
-    url: str,
-    headers: Dict[str, str],
-    verify_portal_host: bool = True,
-) -> Tuple[str, str]:
-    """
-    Fetches and decodes a single RRB/RRCB endpoint response, enforcing content-type
-    validation and official portal host verification on redirects.
-    """
-    _, resp_headers, body, final = client.get_response(url, extra_headers=headers)
-    decoded = _rrb_decode(body, _rrb_check_content_type(resp_headers))
-    if verify_portal_host:
-        host = (urllib.parse.urlsplit(final).hostname or "").lower()
-        if host not in RRB_PORTAL_HOSTS:
-            raise SourceFetchError(
-                "UNAPPROVED_REDIRECT_DOMAIN",
-                f"RRCB request was redirected to unapproved host {host!r}",
-            )
-    return decoded, final
-
-
 def adapter_rrb_rrcb(source: SourceConfig, client: HttpClient) -> List[DiscoveredNotice]:
-    """
-    RRB unified portal adapter (https://rrb.indianrailways.gov.in/):
-    1. Requests the official base endpoint `getdata?loc=` with realistic browser/XHR headers.
-    2. If `getdata?loc=` returns an unrecognized/empty HTML shell or 404 while the host is reachable,
-       falls back to the unified portal homepage (`https://rrb.indianrailways.gov.in/`) to extract
-       notices directly or discover dynamic `getdata?loc=...` endpoints embedded in the page.
-    3. If direct fetching fails with a transient/network error and `RRCB_RELAY_URL_TEMPLATE` is
-       explicitly configured, falls back to the HTTPS relay while still enforcing official domain validation.
-    """
-    xhr_headers = {
+    """RRB portal adapter: requests exactly the base endpoint getdata?loc= (empty loc), optionally via an explicitly configured relay."""
+    headers = {
         "Referer": source.homepage_url,
-        "Origin": source.homepage_url.rstrip("/"),
         "X-Requested-With": "XMLHttpRequest",
         "Accept": "application/json, text/html, */*;q=0.8",
-        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8,hi;q=0.7",
-        "Cache-Control": "no-cache",
-    }
-    page_headers = {
-        "Referer": source.homepage_url,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8,hi;q=0.7",
-        "Cache-Control": "no-cache",
     }
     endpoint = source.notice_urls[0]
 
-    primary_exc: Optional[SourceFetchError] = None
+    def _fetch(url: str, hdrs: Dict[str, str]) -> Tuple[str, str]:
+        _, resp_headers, body, final = client.request(url, extra_headers=hdrs)
+        return _rrb_decode(body, _rrb_check_content_type(resp_headers)), final
+
     try:
-        text, _ = _fetch_rrcb_payload(client, endpoint, xhr_headers, verify_portal_host=True)
-        return parse_rrcb_response(source, text)
+        text, final_url = _fetch(endpoint, headers)
+        host = (urllib.parse.urlsplit(final_url).hostname or "").lower()
+        if host not in RRB_PORTAL_HOSTS:
+            raise SourceFetchError("UNAPPROVED_REDIRECT_DOMAIN", f"RRCB request was redirected to unapproved host {host!r}")
     except SourceFetchError as exc:
-        primary_exc = exc
-
-    # Try fallback URLs (or unified portal homepage if configured/reachable) when primary did not fail
-    # with an unapproved redirect, binary content type, or permanent 403/TLS error.
-    fallback_candidates: List[str] = list(source.notice_urls[1:])
-    if source.homepage_url and source.homepage_url not in fallback_candidates and source.homepage_url != endpoint:
-        mock_routes = getattr(client, "routes", None)
-        if mock_routes is None or source.homepage_url in mock_routes:
-            fallback_candidates.append(source.homepage_url)
-
-    if primary_exc.category not in ("UNAPPROVED_REDIRECT_DOMAIN", "UNEXPECTED_CONTENT_TYPE", "HTTP_403_FORBIDDEN", "TLS_SSL_ERROR"):
-        for fb_url in fallback_candidates:
-            try:
-                fb_text, fb_final = _fetch_rrcb_payload(client, fb_url, page_headers, verify_portal_host=True)
-                try:
-                    return parse_rrcb_response(source, fb_text)
-                except SourceFetchError:
-                    for dyn_url in _discover_rrcb_endpoints_from_homepage(fb_text, fb_final):
-                        if dyn_url == endpoint:
-                            continue
-                        dyn_text, _ = _fetch_rrcb_payload(client, dyn_url, xhr_headers, verify_portal_host=True)
-                        return parse_rrcb_response(source, dyn_text)
-            except SourceFetchError:
-                continue
-
-    relay = _rrb_relay_url(endpoint)
-    if relay is not None and primary_exc.category in _RRB_RELAYABLE_CATEGORIES:
+        diagnosis = ""
+        if type(client) is HttpClient and exc.category in _RRB_DIAGNOSABLE_CATEGORIES:
+            diagnosis = _rrb_diagnose_network(urllib.parse.urlsplit(endpoint).hostname or "rrb.indianrailways.gov.in")
+            logging.getLogger(__name__).warning("[%s] network diagnosis after %s: %s", source.source_id, exc.category, diagnosis)
+        relay = _rrb_relay_url()
+        if relay is None or exc.category not in _RRB_RELAYABLE_CATEGORIES:
+            if diagnosis:
+                raise SourceFetchError(exc.category, f"{exc.detail} | network diagnosis: {diagnosis}") from exc
+            raise
         logging.getLogger(__name__).warning(
             "[%s] direct RRCB fetch failed (%s); trying the configured HTTPS relay (unauthenticated third-party content: links are still restricted to approved official hosts).",
-            source.source_id, primary_exc.category,
+            source.source_id, exc.category,
         )
-        relay_text, _ = _fetch_rrcb_payload(
-            client,
-            relay,
-            {"Accept": "application/json, text/html, */*;q=0.8"},
-            verify_portal_host=False,
-        )
-        return parse_rrcb_response(source, relay_text)
-
-    raise primary_exc
+        text, _ = _fetch(relay, {"Accept": "application/json, text/html, */*;q=0.8"})
+    return parse_rrcb_response(source, text)
 
 
 ADAPTER_REGISTRY: Dict[str, Callable[[SourceConfig, HttpClient], List[DiscoveredNotice]]] = {
@@ -4977,11 +4710,8 @@ def format_telegram_message(
             f"📂 <b>Category:</b> {category}",
         ]
     )
-    pub_date_str = str(pub_date).strip() if pub_date is not None else ""
-    if pub_date_str:
-        lines.append(f"📅 <b>Publication Date:</b> {html.escape(pub_date_str)}")
-    else:
-        lines.append("📅 <b>Publication Date:</b> Not available")
+    if pub_date:
+        lines.append(f"📅 <b>Publication Date:</b> {html.escape(str(pub_date))}")
     if app_date:
         lines.append(f"🗓 <b>Application Date:</b> {html.escape(str(app_date))}")
     if exam_date:
@@ -5669,17 +5399,34 @@ def run_monitor(
                     status_value = "baselined"
                     eligibility_status = "baselined_initial"
                 else:
-                    # Check official notice relevance and classify category (open-category acceptance)
+                    # 1. Check board-level expiry / historical age in Asia/Kolkata
+                    is_expired_or_old = _is_historical_or_expired_for_board(
+                        item,
+                        discovered,
+                        reference_date=reference_date,
+                        max_age_days=max_age_days,
+                    )
+                    # 2. Check strict keyword filtering across the 5 required job-notice categories
                     is_relevant, matched_cat, matched_kw = match_notice_keywords(
                         item.title,
                         item.raw_context or "",
-                        url=item.url,
                         categories=active_keywords,
                     )
-                    # Normalize valid publication dates to YYYY-MM-DD or preserve original date text when uncertain.
-                    # Publication date is informational only and NEVER rejects or suppresses a notice.
-                    preserved_pub_date = normalize_or_preserve_publication_date(item.publication_date)
-                    item.publication_date = preserved_pub_date
+                    # 3. Validation #1 (Before Queuing): Mandatory Asia/Kolkata publication-date validation
+                    date_valid, canonical_pub_date, date_reason = validate_publication_date(
+                        item.publication_date,
+                        reference_date=reference_date,
+                        max_age_days=max_age_days,
+                        context_text=item.raw_context or item.title,
+                        url=item.url,
+                    )
+                    if source_date_is_informational(src.source_id):
+                        # Date is display-only for this source: never reject a newly detected notice because of it.
+                        is_expired_or_old = False
+                        date_valid = True
+                        canonical_pub_date = canonical_pub_date or format_canonical_date(item.publication_date)
+                        if not canonical_pub_date:
+                            item.publication_date = None
 
                     if not is_relevant:
                         status_value = "baselined"
@@ -5692,9 +5439,36 @@ def run_monitor(
                             filter_reason,
                             item.title[:100],
                         )
+                    elif not date_valid or is_expired_or_old:
+                        status_value = "baselined"
+                        effective_date_reason = date_reason if not date_valid else "EXPIRED_OR_HISTORICAL"
+                        filter_reason = f"INVALID_PUBLICATION_DATE:{effective_date_reason}"
+                        eligibility_status = f"rejected:{filter_reason}"
+                        summary.filtered_date_notices += 1
+                        if not date_valid and date_reason in (
+                            "MISSING_PUBLICATION_DATE",
+                            "INVALID_PUBLICATION_DATE",
+                            "FUTURE_PUBLICATION_DATE",
+                            "NON_PUBLICATION_DATE_TYPE",
+                            "AMBIGUOUS_PUBLICATION_DATE",
+                            "CONFLICTING_PUBLICATION_DATES",
+                        ):
+                            summary.rejected_missing_or_invalid_date_notices += 1
+                        else:
+                            summary.rejected_stale_notices += 1
+                        logger.warning(
+                            "[%s] Filtered notice due to publication-date validation (reason=%s, pub_date=%r, ist_today=%s): %s",
+                            src.source_id,
+                            filter_reason,
+                            item.publication_date,
+                            effective_ist_today.isoformat(),
+                            item.title[:100],
+                        )
                     else:
                         status_value = "pending"
                         eligibility_status = "eligible"
+                        if canonical_pub_date:
+                            item.publication_date = canonical_pub_date
                         if matched_cat:
                             item.category = matched_cat
 
@@ -5740,17 +5514,16 @@ def run_monitor(
                     if item.fingerprint not in state["pending_queue"]:
                         state["pending_queue"].append(item.fingerprint)
 
-            # Complete source baseline when in explicit baseline/live_test mode or when >=1 notice was discovered
+            # Complete source baseline even if a validated notice board genuinely has 0 notices
             if source_needs_baseline and not src_state.get("baseline_completed", False):
-                if len(discovered) > 0 or force_baseline or is_live_test or src.source_id != "rrb_rrcb":
-                    src_state["baseline_completed"] = True
-                    src_state["baseline_completed_at"] = utc_now_iso()
-                    logger.info(
-                        "[%s] Baseline completed for %s: recorded %d existing notices.",
-                        src.source_id,
-                        src.organization,
-                        len(discovered),
-                    )
+                src_state["baseline_completed"] = True
+                src_state["baseline_completed_at"] = utc_now_iso()
+                logger.info(
+                    "[%s] Baseline completed for %s: recorded %d existing notices.",
+                    src.source_id,
+                    src.organization,
+                    len(discovered),
+                )
             else:
                 logger.info(
                     "[%s] Checked %s: discovered=%d new=%d baselined=%d",
@@ -5948,9 +5721,19 @@ def run_monitor(
                 is_rel, matched_cat, matched_kw = match_notice_keywords(
                     rec_title,
                     rec_title,
-                    url=rec_norm_url,
                     categories=active_keywords,
                 )
+                # Validation #2 (Pre-Send Gate): Re-validate publication date against Asia/Kolkata today
+                d_valid, canon_date, d_reason = validate_publication_date(
+                    rec_pub_date,
+                    reference_date=reference_date,
+                    max_age_days=max_age_days,
+                    context_text=rec_title,
+                    url=rec_norm_url,
+                )
+                if source_date_is_informational(sid):
+                    d_valid = True
+                    canon_date = canon_date or format_canonical_date(rec_pub_date)
                 if not is_rel:
                     rec["delivery_status"] = "baselined"
                     rec["ledger_status"] = "baselined"
@@ -5959,8 +5742,28 @@ def run_monitor(
                     summary.filtered_irrelevant_notices += 1
                     logger.warning("[%s] Demoted pending notice failing keyword filter (%s): %s", sid, matched_kw, rec_title[:80])
                     continue
+                if not d_valid:
+                    rec["delivery_status"] = "baselined"
+                    rec["ledger_status"] = "baselined"
+                    rec["filter_reason"] = f"INVALID_PUBLICATION_DATE:{d_reason}"
+                    rec["eligibility_status"] = f"rejected:INVALID_PUBLICATION_DATE:{d_reason}"
+                    summary.filtered_date_notices += 1
+                    if d_reason in (
+                        "MISSING_PUBLICATION_DATE",
+                        "INVALID_PUBLICATION_DATE",
+                        "FUTURE_PUBLICATION_DATE",
+                        "NON_PUBLICATION_DATE_TYPE",
+                        "AMBIGUOUS_PUBLICATION_DATE",
+                        "CONFLICTING_PUBLICATION_DATES",
+                    ):
+                        summary.rejected_missing_or_invalid_date_notices += 1
+                    else:
+                        summary.rejected_stale_notices += 1
+                    logger.warning("[%s] Demoted pending notice failing pre-send publication-date validation (%s): %s", sid, d_reason, rec_title[:80])
+                    continue
 
-                rec["publication_date"] = normalize_or_preserve_publication_date(rec_pub_date)
+                if canon_date:
+                    rec["publication_date"] = canon_date
                 if matched_cat and (not rec.get("category") or rec.get("category") == "Official Notice"):
                     rec["category"] = matched_cat
                 rec["eligibility_status"] = "eligible"
@@ -6014,7 +5817,31 @@ def run_monitor(
                         rec["last_delivery_error"] = "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
                 else:
                     for rec in pending_records:
-                        rec["publication_date"] = normalize_or_preserve_publication_date(rec.get("publication_date"))
+                        # Final immediate pre-send publication-date & verified date field check
+                        pre_valid, pre_canon_date, pre_reason = validate_publication_date(
+                            rec.get("publication_date"),
+                            reference_date=reference_date,
+                            max_age_days=max_age_days,
+                            context_text=str(rec.get("title") or ""),
+                            url=str(rec.get("normalized_url") or rec.get("url") or ""),
+                        )
+                        if source_date_is_informational(str(rec.get("source_id") or "")):
+                            pre_valid = True
+                            pre_canon_date = pre_canon_date or format_canonical_date(rec.get("publication_date")) or ""
+                        if not pre_valid or (not pre_canon_date and not source_date_is_informational(str(rec.get("source_id") or ""))):
+                            rec["delivery_status"] = "baselined"
+                            rec["ledger_status"] = "baselined"
+                            rec["filter_reason"] = f"PRE_SEND_DATE_REJECTED:{pre_reason}"
+                            rec["eligibility_status"] = f"rejected:PRE_SEND_DATE_REJECTED:{pre_reason}"
+                            summary.filtered_date_notices += 1
+                            logger.warning(
+                                "Blocked notice immediately before Telegram send due to publication-date check (%s): %s",
+                                pre_reason,
+                                rec.get("title", "")[:80],
+                            )
+                            continue
+
+                        rec["publication_date"] = pre_canon_date or None
                         # Claim notice in ledger before attempting delivery
                         rec["ledger_status"] = "claimed"
                         rec["claimed_at"] = utc_now_iso()
@@ -6238,9 +6065,9 @@ def emit_github_actions_report(
                 )
         else:
             detail = f"{res.get('error_category', 'ERROR')}: {res.get('error', '')}"
-            md.append(f"| {src.source_id} | FAILED | {_clean(detail)[:300]} |")
+            md.append(f"| {src.source_id} | FAILED | {_clean(detail).replace(chr(10), ' ').replace('|', '/')[:700]} |")
             print(
-                "::warning::" + _gha_escape(_clean(f"[{src.source_id}] website check failed - {detail}")[:600]),
+                "::warning::" + _gha_escape(_clean(f"[{src.source_id}] website check failed - {detail}")[:1200]),
                 file=stream, flush=True,
             )
     if summary.failed_websites > 0:
@@ -6426,18 +6253,27 @@ def check_single_source_live(
                 if ledger_status == "baselined":
                     seen_on_prior_ist_day = True
 
-            # 3. Informational publication-date normalization (dates never reject or suppress unseen notices)
-            _, validated_iso_date, _ = validate_publication_date(
+            # 3. Strict Asia/Kolkata same-day publication-date validation (max_age_days=0)
+            is_expired_or_old = _is_historical_or_expired_for_board(
+                item,
+                discovered,
+                reference_date=effective_ist_today,
+                max_age_days=max_age_days,
+            )
+            date_valid, canonical_pub_date, date_reason = validate_publication_date(
                 item.publication_date,
                 reference_date=effective_ist_today,
                 max_age_days=max_age_days,
                 context_text=item.raw_context or item.title,
                 url=item.url,
             )
-            canonical_pub_date = validated_iso_date or normalize_or_preserve_publication_date(item.publication_date)
-            is_expired_or_old = False
-            date_valid = True
-            seen_on_prior_ist_day = already_in_ledger
+
+            if date_informational:
+                # Date-informational source: eligibility means "not yet in the ledger" (a real run baselines first).
+                is_expired_or_old = False
+                date_valid = True
+                canonical_pub_date = canonical_pub_date or format_canonical_date(item.publication_date)
+                seen_on_prior_ist_day = already_in_ledger
 
             if date_valid and not is_expired_or_old and not seen_on_prior_ist_day and (canonical_pub_date or date_informational):
                 notice_payload = {
