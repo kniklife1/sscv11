@@ -40,38 +40,38 @@ Production Python 3.12 and GitHub Actions monitor for **10 official Indian gover
 
 ---
 
-## 3. Open-Category Official Notice Acceptance, Informational Publication-Date Handling & Duplicate Prevention
+## 3. Strict Keyword Filtering, Mandatory Publication-Date Validation & Duplicate Prevention
 
-### 3.1 All Official Notification Types Accepted (5 Primary Categories + Open `"Official Notice"` Fallback)
-Every genuine official notification published on the 10 monitored portals is eligible for discovery, deduplication, and Telegram delivery—never restricted solely to a closed keyword whitelist:
+### 3.1 Strict Keyword Filtering (5 Official Categories)
+Production alerts are sent **only** when the notice title or available row content matches at least one keyword (with word boundaries and case/punctuation/spacing normalization) from these 5 configurable categories:
 
 - **Recruitment:** `new vacancy`, `recruitment`, `notification`, `advertisement`, `apply online`, `application form`, `posts`
 - **Examination:** `exam date`, `examination date`, `exam schedule`, `admit card`, `hall ticket`, `city intimation`
 - **Results:** `result`, `scorecard`, `merit list`, `cut off`, `cutoff`, `selection list`
 - **Answer Keys:** `answer key`, `answerkey`, `provisional answer key`, `final answer key`, `response sheet`
 - **Next Stages:** `DV`, `document verification`, `skill test`, `typing test`, `interview`, `PET`, `PST`, `medical examination`
-- **Official Notice (Open Fallback Category):** Any genuine official notice that does not match one of the 5 specific categories above—including **corrigenda, addenda, errata, amendments, revised notices, important notices, press notes, deadline extensions, cancellations, postponements, rescheduling notices, court/tribunal updates, counselling/zone allocation/panel notices, biometric/OTR/scribe instructions, fee-refund notices, or any newly introduced official notification type** on a monitored notice board or official document link—is accepted and tagged with category `Official Notice`.
 
-**Contextual False-Positive & Boilerplate Protection:**
+**Contextual False-Positive Protection:**
 - Automatically rejects tenders (`NIT`, `e-Tender`, `RFP`, `RFQ`, `GeM bid`), auctions, vendor/hospital empanelments, staff transfer/posting orders, seniority/gradation lists, pension adalats, holiday notifications, and annual reports.
-- Rejects generic website navigation/chrome, utility links (`About Us`, `Contact Us`, `Sitemap`, `Screen Reader Access`), and portal maintenance/downtime banners (`Website is under maintenance`, `Scheduled maintenance downtime`).
 - Validates ambiguous words (`posts`, `notification`, `DV`, `interview`, `PET`, `PST`) so unrelated phrases (such as *"sent by Speed Post / Registered Post"*, *"Ex-Post Facto"*, *"Holiday / Tariff Notification"*, *"Disbursement Voucher (DV No.)"*, or *"Media Interview"*) never trigger job alerts.
 
-### 3.2 Informational Publication-Date Handling (All 10 Sources)
-Every production Telegram alert includes the **Organization**, **Notice Title**, **Category**, **Publication Date**, **Official Notice URL**, and **Application / Examination Dates** when available:
-- **No Publication-Date Eligibility Filtering (`date_policy = "informational"`):** All 10 configured sources use an informational publication-date policy. Notices are **never** skipped, suppressed, or dropped from the pending queue because their publication date is older than today, missing, or unparseable.
-- **Normalize or Preserve:** When a publication date can be reliably parsed (including timezone-aware UTC → `Asia/Kolkata` ISO-8601 timestamps), it is normalized to `YYYY-MM-DD`. When a date string contains date digits that cannot be unambiguously normalized (e.g. `"Oct 2026"` or `"15/10/26"`), the cleaned raw string is preserved. When no publication date is available or a 4-digit-year calendar date is impossible (e.g. `"31-02-2026"`), `publication_date` is stored as `None` and formatted in Telegram alerts as `📅 <b>Publication Date:</b> Not available`. Today's date or fetch time is never fabricated as a fallback.
+### 3.2 Mandatory Same-Day `Asia/Kolkata` Publication-Date Validation (Bug 1 Fix)
+Every production Telegram alert includes the **Official Publication Date**, **Organization**, **Notice Title**, **Category**, **Official Notice URL**, and **Application / Examination Dates** when available:
+- **Strict Same-Day `Asia/Kolkata` Freshness (`MAX_NOTICE_AGE_DAYS = 0`):** Rejects any notice published before today's calendar date in `Asia/Kolkata` (`UTC+05:30`), including yesterday's notices. Validated **twice** — before queuing and immediately before sending.
+- **Timezone-Aware UTC → IST Conversion:** Full ISO-8601 timestamps (such as SSC API `createdAt: "2026-10-23T19:00:00Z"`) are converted to `Asia/Kolkata` before extracting the calendar date.
+- **Strict Date Separation & Conflict Detection:** Never treats a page modified date (`Last modified on ...`), HTTP `Last-Modified`, sitemap `<lastmod>`, application deadline (`Last date to apply ...`, `Closing date ...`, `Visible upto ...`), examination date (`Exam Date: ...`), or scraping timestamp as the official publication date. Fails closed (`CONFLICTING_PUBLICATION_DATES`) if the listing date and linked PDF filename date conflict.
+- **Missing, Ambiguous, or Invalid Dates:** If a notice's publication date is missing, ambiguous (`12/26`), invalid/impossible (e.g., `31-02-2026`), or in the future, the production alert is suppressed, logged with the exact rejection reason, and recorded in state as `baselined`.
 
-### 3.3 5-Layer Notice Identity & Persistent Delivery Ledger
+### 3.3 5-Layer Notice Identity & Persistent Delivery Ledger (Bug 2 Fix)
 - **5-Layer Identity Matching:** Deduplicates notices across (1) SHA-256 fingerprint, (2) official notice/advertisement/document ID (`source_identifier`), (3) canonical direct PDF/document URL (`canonical_pdf_url`), (4) content hash (`content_hash`), and (5) canonical title (`canonical_title`) with `www.` normalization, tracking/cache-busting query removal (`utm_*`, `_t`, `v`, `ver`, `timestamp`, `cachebust`), and table serial-number/badge stripping.
 - **Persistent Delivery Ledger:** Tracks `ledger_status` (`baselined`, `pending`, `claimed`, `sent`, `failed`, `ambiguous`), `telegram_message_id`, `delivered_at`, `first_seen_at`, `publication_date`, and `eligibility_status`, persisting state atomically immediately after each confirmed Telegram send.
 - **Ambiguous Timeout Protection:** If a request times out after HTTP POST transmission (or returns HTTP 200 with a truncated body), the notice is recorded as `ledger_status = "ambiguous"` (`delivery_status = "delivered"`) and is never blindly resent.
 - **Concurrency Queue Stale-SHA Prevention:** `.github/workflows/main.yml` runs `git fetch origin "${GITHUB_REF_NAME}" && git reset --hard "origin/${GITHUB_REF_NAME}"` after acquiring the concurrency lock so overlapping `schedule` and `cron-job.org` `workflow_dispatch` runs always load the freshest committed `data/notice_state.json`.
 
-### 3.4 Fast Concurrent Scraping, No-Op Commit Suppression & Pending Queue
-- **Concurrent Source Fetching:** Scrapes all 10 official sources in parallel via `ThreadPoolExecutor` with split `(10, 20)`s `(connect_timeout, read_timeout)` socket timeouts while processing results in deterministic source order.
+### 3.4 Fast Concurrent Scraping, No-Op Commit Suppression & Pending Queue (Bug 3 Fix)
+- **Concurrent Source Fetching:** Scrapes all 10 official sources in parallel via `ThreadPoolExecutor` with bounded `(6, 10)`s timeouts while processing results in deterministic source order.
 - **No-Op Commit Suppression:** Skips rewriting `data/notice_state.json` when no meaningful state changed, eliminating unnecessary Git commits and push conflicts on quiet 10-minute runs.
-- **Per-Run Cap & Persistent Pending Queue:** Enforces a maximum of **10 production notifications per run** (`MAX_PRODUCTION_ALERTS_PER_RUN = 10`), persisting overflow notices in `pending_queue` for delivery on subsequent runs without dropping older or dateless notices.
+- **Per-Run Cap & Freshness-Revalidated Pending Queue:** Enforces a maximum of **10 production notifications per run** (`MAX_PRODUCTION_ALERTS_PER_RUN = 10`), persisting overflow notices in `pending_queue` and revalidating their `Asia/Kolkata` same-day freshness before sending on the next run.
 
 ---
 
@@ -82,11 +82,12 @@ Every production Telegram alert includes the **Organization**, **Notice Title**,
    - `TELEGRAM_BOT_TOKEN`: Your Telegram Bot API token from `@BotFather`.
    - `TELEGRAM_CHAT_ID`: Your Telegram group, supergroup, or channel ID (e.g. `-100xxxxxxxxxx`).
 3. Optional environment variables / CLI flags:
+   - `MAX_NOTICE_AGE_DAYS` / `--max-age-days`: Freshness threshold in days in `Asia/Kolkata` (default: `0` — strict same-day `Asia/Kolkata`).
    - `MAX_ALERTS_PER_RUN` / `--max-alerts-per-run`: Maximum production notifications sent per run (default: `10`).
-   - `--dry-run`: Run scraping, deduplication, and keyword validation without sending Telegram messages or modifying `data/notice_state.json`.
+   - `--dry-run`: Run scraping, deduplication, and date/keyword validation without sending Telegram messages or modifying `data/notice_state.json`.
    - `NOTICE_KEYWORDS_JSON` / `--keywords-file`: Custom JSON mapping of category names to keyword arrays.
    - `NOTICE_EXTRA_KEYWORDS`: Comma-separated extra recruitment keywords.
-4. Under the **Actions** tab, the workflow runs on schedule every 10 minutes (`*/10 * * * *`) or via manual `workflow_dispatch` (`auto`, `monitor`, `baseline`, `live_test`, `rrcb_probe`, `ping`).
+4. Under the **Actions** tab, the workflow runs on schedule every 10 minutes (`*/10 * * * *`) or via manual `workflow_dispatch` (`auto`, `monitor`, `baseline`, `live_test`).
 
 ---
 
@@ -122,12 +123,12 @@ Typical error responses: `401` bad/expired token; `403` token lacks Actions writ
 
 ---
 
-## 6. Operational Notes & Diagnostics
+## 6. Known Limitations (evidence from the 2026-10-25 audit)
 
-- **Publication dates are informational across all 10 sources:** Sources that omit publication dates on their notice boards (such as `dsssb`, `rssb`, or partial rows on `upsc`, `uppsc`, `hssc`, `upprpb`) still generate alerts whenever a genuinely new keyword-matching notice appears. The Telegram message shows `Publication Date: Not available` when the source does not provide a date.
-- **A green run does not mean every website was reachable.** With `--allow-partial-source-failures` the job exits 0 if at least one website succeeded. Failed websites are listed as `::warning::` annotations and in the job summary.
-- **Telegram configuration errors keep notices queued.** If Telegram rejects messages because of the bot/chat setup (wrong token, `chat not found`, bot blocked or without rights), the run goes red (exit 4) but the notice stays queued and is delivered after you fix the secrets. Errors specific to one message (for example unparseable HTML) still stop retries for that notice.
-- **Telegram is sent before state is committed.** State is written atomically after each confirmed send, and the workflow also persists it after a cancel/timeout, but if the final `git push` fails three times the next run can repeat alerts.
+- **Several sources currently expose almost no publication dates.** In the ledger snapshot (`updated_at` 2026-10-24T15:25:03Z, 405 entries) the share of records carrying a publication date was: `ssc` 103/103, `ukpsc` 8/8, `hssc` 25/45, `uppsc` 17/58, `mpesb` 2/3, `upsc` 7/132, `upprpb` 2/40, `dsssb` 0/9, `rssb` 0/7. Under the strict date policy a notice without a verifiable publication date is **never alerted** and is recorded as `baselined`, so those sources can currently produce few or no alerts. Only one ledger record has ever reached `sent`. The monitor now reports this per run (`::notice::` annotation and `discovered_with_publication_date`), but whether to relax the policy for date-less boards is a product decision that has **not** been changed.
+- **A green run does not mean every website was reachable.** With `--allow-partial-source-failures` the job exits 0 if at least one website succeeded. Failed websites are now listed as `::warning::` annotations and in the job summary.
+- **Telegram configuration errors keep notices queued.** If Telegram rejects messages because of the bot/chat setup (wrong token, `chat not found`, bot blocked or without rights), the run goes red (exit 4) but the notice stays queued and is delivered after you fix the secrets. Errors specific to one message (for example unparseable HTML) still stop retries for that notice. Strict-date sources can only deliver notices that are still same-day when the retry happens.
+- **Telegram is sent before state is committed.** State is written atomically after each confirmed send, and the workflow now also persists it after a cancel/timeout, but if the final `git push` fails three times the next run can repeat alerts.
 - The live-check CLI (`--live-check-json`) exits 0 whenever a report is produced; read `ok` / `run_outcome` in the JSON.
 
 ---
@@ -144,17 +145,20 @@ Typical error responses: `401` bad/expired token; `403` token lacks Actions writ
 | `discovered_with_publication_date`, `relevant_with_publication_date`, `date_coverage_warning` | publication-date coverage per source |
 | `ledger_entry_count`, `ledger_unique_fingerprint_count`, `ledger_sent_count` | separately labelled ledger counts (entries in `notices`, distinct fingerprints, records with status `sent`/`ambiguous`) |
 
-HTTP requests are bounded by a per-attempt wall-clock deadline (`DEFAULT_REQUEST_DEADLINE_SECONDS`, 30 s) and a per-source budget (`DEFAULT_SOURCE_BUDGET_SECONDS`, 90 s); error categories `REQUEST_DEADLINE_EXCEEDED` and `SOURCE_TIME_BUDGET_EXCEEDED` report them.
+HTTP requests are bounded by a per-attempt wall-clock deadline (`DEFAULT_REQUEST_DEADLINE_SECONDS`, 30 s) and a per-source budget (`DEFAULT_SOURCE_BUDGET_SECONDS`, 90 s); new error categories `REQUEST_DEADLINE_EXCEEDED` and `SOURCE_TIME_BUDGET_EXCEEDED` report them.
 
 ---
 
 ## 8. RRB Portal Source (`rrb_rrcb`)
 
-- **Official portal & endpoints:** `https://rrb.indianrailways.gov.in/` and `https://rrb.indianrailways.gov.in/getdata?loc=`. `adapter_rrb_rrcb` tries the `getdata?loc=` feed with browser/XHR headers and falls back to fetching the unified portal homepage (`https://rrb.indianrailways.gov.in/`) and any dynamically discovered `getdata?loc=...` endpoints embedded in the homepage scripts/links.
-- **Split connect/read timeouts:** `HttpClient` applies `connect_timeout` (`10s`) strictly to TCP + TLS establishment and switches the socket to `read_timeout` (`20s`) before waiting for HTTP response headers/body, preventing premature `CONNECTION_TIMEOUT` failures when `getdata` takes >6s to generate its response after TLS handshake.
-- **Genuine empty response vs. failure:** Binary content types are rejected (`UNEXPECTED_CONTENT_TYPE`); text is decoded as UTF-8 first (Devanagari-safe). Genuine empty responses (`[]`, `{"data": []}`, `{"records": []}`, the Hindi `"कोई अभिलेख उपलब्ध नहीं है!"` message, or a recognized empty HTML notice board) return an empty notice list (`status="ok"`, `discovered=0`, `test_outcome="NO_NOTICE_FOUND"`). Blank/whitespace bodies, invalid JSON, WAF/challenge pages, unrendered SPA shells without fallback notices, or unrecognized schemas raise `SourceFetchError` (`EMPTY_RESPONSE`, `INVALID_JSON`, `ACCESS_DENIED_PAGE`, `UNRECOGNIZED_STRUCTURE`).
+- **Endpoint:** exactly `https://rrb.indianrailways.gov.in/getdata?loc=` (empty `loc`). The earlier `loc=RRCB` value is gone: in a browser it only shows the Hindi message `कोई अभिलेख उपलब्ध नहीं है!` ("No records available!"). The source id stays `rrb_rrcb` so existing state is untouched.
+- **What is NOT known:** the real response of the base endpoint has never been captured in this project. It may be JSON, an HTML table/fragment or an "empty" message, and it may list notices of **all** boards, not only RRCB. The adapter therefore makes no board claim: the Telegram organisation is `Railway Recruitment Boards (RRB portal feed)`, and every parsed record is treated as an RRB-portal notice. If the base endpoint cannot separate boards, you will receive keyword-matching notices from every board it lists (still capped at 10 alerts per run).
+- **Response handling:** binary content types are rejected (`UNEXPECTED_CONTENT_TYPE`); text is decoded as UTF-8 first (Devanagari-safe); the Hindi "no records" message is reported as `NO_RECORDS_AVAILABLE` and is never a notice; an empty body, invalid JSON, a challenge page, an application shell or any response without recognisable records is an error (`EMPTY_RESPONSE`, `INVALID_JSON`, `ACCESS_DENIED_PAGE`, `UNRECOGNIZED_STRUCTURE`). **An error is never a successful empty feed**, so a baseline can never be completed from an empty response. The failure only affects this source; the other nine continue.
 - **Links:** only `rrb.indianrailways.gov.in`, `indianrailways.gov.in`, `rrbapply.gov.in` and TCS iON (`*.digialm.com`); look-alike hosts, retired regional RRB domains and anything else are dropped; a redirect away from the portal host is an error.
-- **First non-empty run baselines safely:** if `rrb_rrcb` has not completed its baseline yet and returns an empty list (`0` notices), `baseline_completed` remains `false` so the first non-empty response baselines existing notices without flooding Telegram.
+- **Date policy (this source only):** the publication date is shown when it can be parsed, but it never rejects a notice and is never invented (no fetch time, deadline or today's date). The other nine sources keep the strict `Asia/Kolkata` same-day rule.
+- **First run is silent:** the first *successful* fetch baselines the feed with no alerts. "New" means *not in the ledger after baseline*.
 - **Identity:** each notice has its own identifier (the feed's record id, else a hash of its document URL). The CEN number is deliberately not used, because one CEN has many notices.
-- **RRB endpoint probe (read-only):** Actions -> *Government Notice Telegram Monitor* -> Run workflow -> `mode = rrcb_probe`. Only the probe job runs: no secrets, no Telegram, no commits, no state change.
-- **Optional relay (off by default):** if direct access from GitHub is blocked at the TCP/IP layer by NIC/CRIS firewall rules, set the repository secret `RRCB_RELAY_URL_TEMPLATE` to an `https://` URL containing `{url}`. It is used only after a network-type failure of the direct request (timeout, reset, DNS, 5xx), never for 403/404.
+- **A connection timeout is a network problem, not a URL, header or parser problem.** On GitHub-hosted runners this source fails with `CONNECTION_TIMEOUT: Timed out connecting to https://rrb.indianrailways.gov.in/getdata?loc=: timed out` (confirmed in the `sscv8` and `sscv10` runs). That exact wording is produced only when the **TCP connection attempt itself gets no answer**: a stalled TLS handshake reads `...The handshake operation timed out`, and a server that accepts the connection but stays silent reads `Connection timed out for ...`. So the portal never answers the runner's connection request, and no request detail (URL, query string, headers, timeouts, parser) can change that. The portal answering in your own browser only shows it accepts your network; *why* it ignores GitHub's is not proven here (IP/geo filtering of cloud ranges is the usual cause for Indian government hosts). When this happens the run's annotation now ends with a `network diagnosis:` line (DNS result, whether TCP 443 and 80 answer for each IP, and a verdict), so the cause is visible without opening logs.
+- **If the verdict says the server does not answer TCP connections from the runner** the only real remedies are to fetch from a different network: (a) a self-hosted GitHub runner with an Indian internet connection (free, but needs an always-on machine; ask for a separate RRB-only workflow so the other nine sources keep running on GitHub's runners), or (b) a relay that itself runs from an Indian IP, via `RRCB_RELAY_URL_TEMPLATE` (unverified until the probe confirms it works). Otherwise this source stays red and the other nine are unaffected.
+- **RRB endpoint probe (read-only):** Actions -> *Government Notice Telegram Monitor* -> Run workflow -> `mode = rrcb_probe`. Only the probe job runs: no secrets, no Telegram, no commits, no state change. It reports DNS/TCP/TLS reachability from the runner, the response of the base endpoint (and of the old `loc=RRCB` URL for comparison), whether the Hindi "no records" message was detected, what the adapter parses, and uploads the raw bodies as the `rrcb-probe-output` artifact.
+- **Optional relay (off by default):** if direct access from GitHub is blocked, set the repository secret `RRCB_RELAY_URL_TEMPLATE` to an `https://` URL containing `{url}`. It is used only after a network-type failure of the direct request (timeout, reset, DNS, 5xx), never for 403/404. No relay is configured unless you provide one; relay output is unauthenticated third-party content and links are still restricted to the approved hosts. Test a relay with the probe's `relay_url_template` input first.
